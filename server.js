@@ -41,12 +41,14 @@ async function resolveGoogleNewsUrl(googleUrl) {
   });
 
   try {
+    // పేజీ లోడ్ అయ్యే వరకు ఆగుతుంది
     await page.goto(googleUrl, {
       waitUntil: "domcontentloaded",
       timeout: 30000
     });
 
-    await page.waitForTimeout(2500);
+    // రిడైరెక్షన్ పూర్తిగా జరిగే వరకు 3 సెకన్లు ఆగుతుంది
+    await page.waitForTimeout(3000);
 
     const finalUrl = page.url();
 
@@ -58,32 +60,48 @@ async function resolveGoogleNewsUrl(googleUrl) {
       return finalUrl;
     }
 
-    const candidates = await page.evaluate(() => {
-      const out = [];
+    // Execution context destroyed ఎర్రర్ రాకుండా సురక్షితంగా వెతకడం
+    let candidates = [];
+    try {
+      candidates = await page.evaluate(() => {
+        const out = [];
 
-      document.querySelectorAll("a[href]").forEach(a => {
-        const href = a.href;
-        if (
-          href &&
-          /^https?:\/\//i.test(href) &&
-          !/news\.google\.com/i.test(href) &&
-          !/google\./i.test(new URL(href).hostname)
-        ) {
-          out.push(href);
-        }
+        document.querySelectorAll("a[href]").forEach(a => {
+          const href = a.href;
+          if (
+            href &&
+            /^https?:\/\//i.test(href) &&
+            !/news\.google\.com/i.test(href) &&
+            !/google\./i.test(new URL(href).hostname)
+          ) {
+            out.push(href);
+          }
+        });
+
+        const canonical = document.querySelector('link[rel="canonical"]');
+        if (canonical && canonical.href) out.unshift(canonical.href);
+
+        const og = document.querySelector('meta[property="og:url"]');
+        if (og && og.content) out.unshift(og.content);
+
+        return [...new Set(out)];
       });
-
-      const canonical = document.querySelector('link[rel="canonical"]');
-      if (canonical && canonical.href) out.unshift(canonical.href);
-
-      const og = document.querySelector('meta[property="og:url"]');
-      if (og && og.content) out.unshift(og.content);
-
-      return [...new Set(out)];
-    });
+    } catch (evalErr) {
+      // రిడైరెక్ట్ అవ్వడం వల్ల ఎర్రర్ వస్తే, రిడైరెక్ట్ అయిన తదుపరి పేజీ URL ని నేరుగా తీసుకుంటుంది
+      const currentUrl = page.url();
+      if (currentUrl && !/news\.google\.com/i.test(currentUrl)) {
+        return currentUrl;
+      }
+    }
 
     for (const url of candidates) {
       if (!/news\.google\.com/i.test(url)) return url;
+    }
+
+    // ఏదీ కుదరకపోతే చివరిగా ప్రాసెస్ అయిన URL ని ఇస్తుంది
+    const fallbackUrl = page.url();
+    if (fallbackUrl && !/news\.google\.com/i.test(fallbackUrl)) {
+      return fallbackUrl;
     }
 
     throw new Error("Google News నుంచి అసలు publisher URL పొందలేకపోయాం.");
