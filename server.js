@@ -6,20 +6,20 @@ const Parser = require('rss-parser');
 const app = express();
 const parser = new Parser({
   headers: {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,ta;q=0.8'
   },
-  timeout: 10000
+  timeout: 15000
 });
 
 app.use(cors());
 app.use(express.json());
 
-// Health Check Endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.json({ status: 'ok' });
 });
 
-// RSS Fetch Endpoint
 app.get('/fetch-rss', async (req, res) => {
   const rssUrl = req.query.url;
 
@@ -28,31 +28,32 @@ app.get('/fetch-rss', async (req, res) => {
   }
 
   try {
-    // 1. First try parsing directly with rss-parser
-    const feed = await parser.parseURL(rssUrl);
+    // Attempt 1: Fetch using Axios with realistic browser headers
+    const response = await axios.get(rssUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache'
+      },
+      timeout: 15000
+    });
+
+    const feed = await parser.parseString(response.data);
     return res.json({ items: feed.items });
 
-  } catch (firstErr) {
-    console.log(`Direct RSS fetch failed for ${rssUrl}, retrying with Axios...`);
-
+  } catch (err) {
+    console.log(`Axios failed for ${rssUrl}, trying direct parser fallback...`);
+    
     try {
-      // 2. Fallback using Axios if direct fetch hits CORS or User-Agent blockage
-      const response = await axios.get(rssUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/rss+xml, application/xml, text/xml, */*'
-        },
-        timeout: 10000
-      });
-
-      const feed = await parser.parseString(response.data);
+      // Attempt 2: Fallback to direct RSS parser
+      const feed = await parser.parseURL(rssUrl);
       return res.json({ items: feed.items });
-
-    } catch (secondErr) {
-      console.error(`Axios RSS fetch failed: ${secondErr.message}`);
+    } catch (fallbackErr) {
+      console.error(`Fetch failed for ${rssUrl}: ${fallbackErr.message}`);
       return res.status(500).json({
         error: 'RSS fetch failed',
-        details: secondErr.message
+        details: fallbackErr.message
       });
     }
   }
@@ -60,5 +61,5 @@ app.get('/fetch-rss', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Lightweight Proxy Server running on port ${PORT}`);
+  console.log(`Robust Proxy Server running on port ${PORT}`);
 });
