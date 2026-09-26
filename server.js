@@ -13,7 +13,6 @@ app.use(cors({ origin: "*" }));
 
 let browser = null;
 
-// మెమరీ సమస్యలు రాకుండా బ్రౌజర్‌ను ఆప్టిమైజ్ చేయడం
 async function getBrowser() {
   if (!browser || !browser.isConnected()) {
     browser = await chromium.launch({
@@ -25,7 +24,6 @@ async function getBrowser() {
         "--disable-accelerated-2d-canvas",
         "--no-first-run",
         "--no-zygote",
-        "--single-process", // మెమరీ వినియోగాన్ని బాగా తగ్గిస్తుంది
         "--disable-gpu"
       ]
     });
@@ -33,93 +31,81 @@ async function getBrowser() {
   return browser;
 }
 
+// Google News URL ని అసలు Publisher URL గా మార్చే మెరుగైన ఫంక్షన్
 async function resolveGoogleNewsUrl(googleUrl) {
-  if (!/news\.google\.com\/rss\/articles\//i.test(googleUrl)) {
+  if (!/news\.google\.com/i.test(googleUrl)) {
     return googleUrl;
   }
 
   let page = null;
+  let context = null;
+
   try {
     const b = await getBrowser();
-    const context = await b.newContext({
+    context = await b.newContext({
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      locale: "ta-IN",
+      locale: "en-US",
       extraHTTPHeaders: {
-        "Accept-Language": "ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7"
+        "Accept-Language": "en-US,en;q=0.9"
       }
     });
 
     page = await context.newPage();
 
-    // అనవసరమైన ఇమేజ్‌లు, ఫాంట్‌లు, CSS లోడ్ కాకుండా నిరోధించడం ద్వారా వేగం పెరుగుతుంది
+    // అవసరం లేని ఇమేజ్‌లు మరియు CSS ని బ్లాక్ చేయడం ద్వారా వేగవంతం చేయడం
     await page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", route => route.abort());
 
-    await page.goto(googleUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 25000
+    // గూగుల్ రీడైరెక్ట్ కోసం అభ్యర్థనను పంపడం
+    const response = await page.goto(googleUrl, {
+      waitUntil: "commit",
+      timeout: 20000
     });
 
-    await page.waitForTimeout(2000);
-
-    const finalUrl = page.url();
-
-    if (
-      finalUrl &&
-      !/news\.google\.com/i.test(finalUrl) &&
-      /^https?:\/\//i.test(finalUrl)
-    ) {
-      await context.close();
-      return finalUrl;
-    }
-
-    let candidates = [];
-    try {
-      candidates = await page.evaluate(() => {
-        const out = [];
-        document.querySelectorAll("a[href]").forEach(a => {
-          const href = a.href;
-          if (
-            href &&
-            /^https?:\/\//i.test(href) &&
-            !/news\.google\.com/i.test(href) &&
-            !/google\./i.test(new URL(href).hostname)
-          ) {
-            out.push(href);
-          }
-        });
-
-        const canonical = document.querySelector('link[rel="canonical"]');
-        if (canonical && canonical.href) out.unshift(canonical.href);
-
-        const og = document.querySelector('meta[property="og:url"]');
-        if (og && og.content) out.unshift(og.content);
-
-        return [...new Set(out)];
-      });
-    } catch (evalErr) {
+    // రీడైరెక్షన్ పూర్తయ్యే వరకు గరిష్టంగా 4 సెకన్ల సమయం ఇవ్వడం
+    for (let i = 0; i < 8; i++) {
+      await page.waitForTimeout(500);
       const currentUrl = page.url();
-      if (currentUrl && !/news\.google\.com/i.test(currentUrl)) {
+      if (currentUrl && !/news\.google\.com/i.test(currentUrl) && /^https?:\/\//i.test(currentUrl)) {
         await context.close();
         return currentUrl;
       }
     }
 
+    // DOM లోని Canonical లేదా HTML లింకుల నుండి ఒరిజినల్ URL ను వెతకడం
+    const extractedUrl = await page.evaluate(() => {
+      // 1. Anchor tags తో చెక్ చేయడం
+      const links = Array.from(document.querySelectorAll("a[href]"));
+      for (const a of links) {
+        const href = a.href;
+        if (href && /^https?:\/\//i.test(href) && !/google\.com/i.test(href)) {
+          return href;
+        }
+      }
+      // 2. Canonical Tag తో చెక్ చేయడం
+      const canonical = document.querySelector('link[rel="canonical"]');
+      if (canonical && canonical.href && !/google\.com/i.test(canonical.href)) {
+        return canonical.href;
+      }
+      // 3. Open Graph URL తో చెక్ చేయడం
+      const og = document.querySelector('meta[property="og:url"]');
+      if (og && og.content && !/google\.com/i.test(og.content)) {
+        return og.content;
+      }
+      return null;
+    });
+
     await context.close();
 
-    for (const url of candidates) {
-      if (!/news\.google\.com/i.test(url)) return url;
-    }
-
-    if (finalUrl && !/news\.google\.com/i.test(finalUrl)) {
-      return finalUrl;
+    if (extractedUrl) {
+      return extractedUrl;
     }
 
     throw new Error("Google News నుంచి అసలు publisher URL పొందలేకపోయాం.");
   } catch (err) {
-    if (page && page.context()) {
-      await page.context().close().catch(() => {});
+    if (context) {
+      await context.close().catch(() => {});
     }
     throw err;
   }
@@ -185,7 +171,7 @@ app.get("/article", async (req, res) => {
 
     if (/news\.google\.com/i.test(publisherUrl)) {
       return res.status(409).send(
-        "<h3 style='font-family:Arial;padding:20px'>" +
+        "<h3 style='font-family:Arial;padding:20px;color:#ef4444'>" +
         "Google News నుంచి publisher URL పొందలేకపోయాం." +
         "</h3>"
       );
@@ -200,7 +186,7 @@ app.get("/article", async (req, res) => {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
           "AppleWebKit/537.36 (KHTML, like Gecko) " +
           "Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "ta-IN,ta;q=0.9,en;q=0.7"
+        "Accept-Language": "en-US,en;q=0.9"
       },
       validateStatus: s => s >= 200 && s < 500
     });
@@ -222,7 +208,7 @@ app.get("/article", async (req, res) => {
   } catch (e) {
     res.status(502).send(
       `<html><body style="font-family:Arial;padding:20px">
-       <h3>వార్తను లోడ్ చేయలేకపోయాం</h3>
+       <h3 style="color:#ef4444">వార్తను లోడ్ చేయలేకపోయాం</h3>
        <p>${String(e.message).replace(/[<>&"]/g, "")}</p>
        </body></html>`
     );
