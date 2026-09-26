@@ -11,20 +11,26 @@ const PORT = process.env.PORT || 10000;
 
 app.use(cors({ origin: "*" }));
 
-let browserPromise = null;
+let browser = null;
 
+// మెమరీ సమస్యలు రాకుండా బ్రౌజర్‌ను ఆప్టిమైజ్ చేయడం
 async function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = chromium.launch({
+  if (!browser || !browser.isConnected()) {
+    browser = await chromium.launch({
       headless: true,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage"
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process", // మెమరీ వినియోగాన్ని బాగా తగ్గిస్తుంది
+        "--disable-gpu"
       ]
     });
   }
-  return browserPromise;
+  return browser;
 }
 
 async function resolveGoogleNewsUrl(googleUrl) {
@@ -32,25 +38,30 @@ async function resolveGoogleNewsUrl(googleUrl) {
     return googleUrl;
   }
 
-  const browser = await getBrowser();
-  const page = await browser.newPage({
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    locale: "ta-IN",
-    extraHTTPHeaders: {
-      "Accept-Language": "ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
-  });
-
+  let page = null;
   try {
-    // పేజీ నేవిగేషన్‌ను జాగ్రత్తగా హ్యాండిల్ చేయడం
-    await page.goto(googleUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000
+    const b = await getBrowser();
+    const context = await b.newContext({
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      locale: "ta-IN",
+      extraHTTPHeaders: {
+        "Accept-Language": "ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7"
+      }
     });
 
-    await page.waitForTimeout(3000);
+    page = await context.newPage();
+
+    // అనవసరమైన ఇమేజ్‌లు, ఫాంట్‌లు, CSS లోడ్ కాకుండా నిరోధించడం ద్వారా వేగం పెరుగుతుంది
+    await page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", route => route.abort());
+
+    await page.goto(googleUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 25000
+    });
+
+    await page.waitForTimeout(2000);
 
     const finalUrl = page.url();
 
@@ -59,6 +70,7 @@ async function resolveGoogleNewsUrl(googleUrl) {
       !/news\.google\.com/i.test(finalUrl) &&
       /^https?:\/\//i.test(finalUrl)
     ) {
+      await context.close();
       return finalUrl;
     }
 
@@ -66,7 +78,6 @@ async function resolveGoogleNewsUrl(googleUrl) {
     try {
       candidates = await page.evaluate(() => {
         const out = [];
-
         document.querySelectorAll("a[href]").forEach(a => {
           const href = a.href;
           if (
@@ -90,22 +101,27 @@ async function resolveGoogleNewsUrl(googleUrl) {
     } catch (evalErr) {
       const currentUrl = page.url();
       if (currentUrl && !/news\.google\.com/i.test(currentUrl)) {
+        await context.close();
         return currentUrl;
       }
     }
+
+    await context.close();
 
     for (const url of candidates) {
       if (!/news\.google\.com/i.test(url)) return url;
     }
 
-    const fallbackUrl = page.url();
-    if (fallbackUrl && !/news\.google\.com/i.test(fallbackUrl)) {
-      return fallbackUrl;
+    if (finalUrl && !/news\.google\.com/i.test(finalUrl)) {
+      return finalUrl;
     }
 
     throw new Error("Google News నుంచి అసలు publisher URL పొందలేకపోయాం.");
-  } finally {
-    await page.close();
+  } catch (err) {
+    if (page && page.context()) {
+      await page.context().close().catch(() => {});
+    }
+    throw err;
   }
 }
 
@@ -176,7 +192,7 @@ app.get("/article", async (req, res) => {
     }
 
     const response = await axios.get(publisherUrl, {
-      timeout: 30000,
+      timeout: 25000,
       maxRedirects: 10,
       responseType: "text",
       headers: {
@@ -192,14 +208,10 @@ app.get("/article", async (req, res) => {
     const contentType = String(response.headers["content-type"] || "");
 
     if (!contentType.includes("text/html")) {
-      return res.status(502).send(
-        "Publisher returned a non-HTML response."
-      );
+      return res.status(502).send("Publisher returned a non-HTML response.");
     }
 
-    const finalUrl =
-      response.request?.res?.responseUrl || publisherUrl;
-
+    const finalUrl = response.request?.res?.responseUrl || publisherUrl;
     const rewritten = rewriteHtml(response.data, finalUrl);
 
     res.status(response.status);
@@ -218,14 +230,10 @@ app.get("/article", async (req, res) => {
 });
 
 process.on("SIGTERM", async () => {
-  try {
-    if (browserPromise) {
-      const b = await browserPromise;
-      await b.close();
-    }
-  } finally {
-    process.exit(0);
+  if (browser) {
+    await browser.close().catch(() => {});
   }
+  process.exit(0);
 });
 
 app.listen(PORT, () => {
