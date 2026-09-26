@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const Parser = require('rss-parser');
-const { chromium } = require('playwright');
 
 const app = express();
 
@@ -16,11 +15,232 @@ const parser = new Parser({
 
 app.use(cors());
 
-/* =========================
+
+/* =========================================================
+   GOOGLE NEWS URL RESOLVER
+   ========================================================= */
+
+async function resolveGoogleNewsUrl(googleUrl) {
+
+  // ఇది Google News URL కాకపోతే నేరుగా return
+  if (!googleUrl.includes('news.google.com/rss/articles/')) {
+    return googleUrl;
+  }
+
+  console.log('Google News URL:', googleUrl);
+
+  try {
+
+    /*
+     * Google News article page తెరవడం ద్వారా
+     * article ID / signature / timestamp సమాచారం పొందుతాం.
+     */
+
+    const pageResponse = await axios.get(googleUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
+        'Accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9'
+      },
+      timeout: 20000,
+      maxRedirects: 5
+    });
+
+    const html = pageResponse.data;
+
+    /*
+     * Google News pageలోని decoding parameters
+     */
+
+    const idMatch =
+      html.match(/data-n-a-id="([^"]+)"/) ||
+      html.match(/data-n-a-id='([^']+)'/);
+
+    const signatureMatch =
+      html.match(/data-n-a-sg="([^"]+)"/) ||
+      html.match(/data-n-a-sg='([^']+)'/);
+
+    const timestampMatch =
+      html.match(/data-n-a-ts="([^"]+)"/) ||
+      html.match(/data-n-a-ts='([^']+)'/);
+
+    /*
+     * కొన్ని Google News versionsలో ID URL నుంచే తీసుకోవచ్చు
+     */
+
+    const urlParts = googleUrl.split('/rss/articles/');
+
+    let articleId = null;
+
+    if (urlParts.length > 1) {
+      articleId = urlParts[1].split('?')[0];
+    }
+
+    const id = idMatch ? idMatch[1] : articleId;
+    const signature = signatureMatch ? signatureMatch[1] : null;
+    const timestamp = timestampMatch ? timestampMatch[1] : null;
+
+    console.log('Google Article ID:', id);
+    console.log('Signature found:', !!signature);
+    console.log('Timestamp found:', !!timestamp);
+
+    if (!id) {
+      throw new Error('Google News article ID దొరకలేదు.');
+    }
+
+
+    /*
+     * Google News internal resolution request
+     */
+
+    const rpcPayload = [
+      [
+        [
+          'Fbv4je',
+          JSON.stringify([
+            'garturlreq',
+            [
+              [
+                'en-US',
+                'US',
+                [
+                  'FINANCE_TOP_INDICES',
+                  'WEB_TEST_1_0_0'
+                ],
+                null,
+                null,
+                1,
+                1,
+                'US:en',
+                null,
+                180,
+                null,
+                null,
+                null,
+                null,
+                null,
+                0,
+                null,
+                null,
+                [
+                  1608992183,
+                  723341000
+                ]
+              ],
+              'en-US',
+              'US',
+              1,
+              [2, 3, 4, 8],
+              1,
+              0,
+              '655000234',
+              0,
+              0,
+              null
+            ],
+            id
+          ]),
+          null,
+          'generic'
+        ]
+      ]
+    ];
+
+    const rpcBody =
+      'f.req=' +
+      encodeURIComponent(JSON.stringify(rpcPayload));
+
+
+    const rpcResponse = await axios.post(
+      'https://news.google.com/_/DotsSplashUi/data/batchexecute?rpcids=Fbv4je',
+      rpcBody,
+      {
+        headers: {
+          'Content-Type':
+            'application/x-www-form-urlencoded;charset=UTF-8',
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
+          'Accept':
+            '*/*',
+          'Origin':
+            'https://news.google.com',
+          'Referer':
+            googleUrl
+        },
+        timeout: 20000
+      }
+    );
+
+
+    const responseText = rpcResponse.data;
+
+    console.log(
+      'Google resolution response received:',
+      responseText.length
+    );
+
+
+    /*
+     * Responseలో publisher URL వెతుకుతాం
+     */
+
+    const urlMatches = responseText.match(
+      /https?:\/\/[^"\\\s]+/g
+    );
+
+    if (urlMatches && urlMatches.length) {
+
+      for (const possibleUrl of urlMatches) {
+
+        let cleanUrl = possibleUrl
+          .replace(/\\u003d/g, '=')
+          .replace(/\\u0026/g, '&')
+          .replace(/\\\//g, '/')
+          .replace(/\\+"/g, '"')
+          .replace(/["\\]+$/g, '');
+
+        if (
+          cleanUrl.startsWith('http') &&
+          !cleanUrl.includes('google.com') &&
+          !cleanUrl.includes('gstatic.com') &&
+          !cleanUrl.includes('googleusercontent.com')
+        ) {
+
+          console.log(
+            'Publisher URL found:',
+            cleanUrl
+          );
+
+          return cleanUrl;
+        }
+      }
+    }
+
+
+    throw new Error(
+      'Google News resolution responseలో publisher URL దొరకలేదు.'
+    );
+
+  } catch (err) {
+
+    console.error(
+      'Google News Resolver Error:',
+      err.message
+    );
+
+    throw err;
+  }
+}
+
+
+/* =========================================================
    RSS FEED
-========================= */
+   ========================================================= */
 
 app.get('/fetch-rss', async (req, res) => {
+
   const rssUrl = req.query.url;
 
   if (!rssUrl) {
@@ -30,6 +250,7 @@ app.get('/fetch-rss', async (req, res) => {
   }
 
   try {
+
     const response = await axios.get(rssUrl, {
       headers: {
         'User-Agent':
@@ -58,82 +279,64 @@ app.get('/fetch-rss', async (req, res) => {
 });
 
 
-/* =========================
-   GOOGLE NEWS → PUBLISHER URL
-========================= */
+/* =========================================================
+   ARTICLE
+   ========================================================= */
 
 app.get('/article', async (req, res) => {
 
-  const articleUrl = req.query.url;
+  const googleUrl = req.query.url;
 
-  if (!articleUrl) {
-    return res.status(400).send('Article URL అవసరం');
+  if (!googleUrl) {
+    return res.status(400).send(
+      'Article URL అవసరం'
+    );
   }
-
-  let browser;
 
   try {
 
-    console.log('Original URL:', articleUrl);
+    console.log('Article request:', googleUrl);
 
-    browser = await chromium.launch({
-      headless: true
-    });
+    /*
+     * Google News → అసలు Publisher URL
+     */
 
-    const page = await browser.newPage({
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36'
-    });
+    const publisherUrl =
+      await resolveGoogleNewsUrl(googleUrl);
 
-    await page.goto(articleUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
-
-    await page.waitForTimeout(3000);
-
-    const finalUrl = page.url();
-
-    console.log('Publisher URL:', finalUrl);
-
-    await browser.close();
-    browser = null;
-
-    if (!finalUrl || finalUrl.includes('news.google.com')) {
-      return res.status(502).send(`
-        <html>
-        <body style="font-family:Arial;padding:30px;">
-        <h3>వార్త వెబ్‌సైట్ URL పొందలేకపోయాం</h3>
-        <p>Google News నుంచి అసలు publisher URL అందలేదు.</p>
-        </body>
-        </html>
-      `);
-    }
+    console.log(
+      'Final Publisher URL:',
+      publisherUrl
+    );
 
 
-    /* =========================
-       PUBLISHER PAGE DOWNLOAD
-    ========================= */
+    /*
+     * Publisher page download
+     */
 
-    const response = await axios.get(finalUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
-        'Accept':
-          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7'
-      },
-      timeout: 30000,
-      maxRedirects: 10
-    });
+    const articleResponse = await axios.get(
+      publisherUrl,
+      {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
+          'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language':
+            'ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7'
+        },
+        timeout: 30000,
+        maxRedirects: 10
+      }
+    );
 
 
-    let html = response.data;
+    let html = articleResponse.data;
 
 
-    /* =========================
-       REMOVE IFRAME BLOCKING HEADERS
-    ========================= */
+    /*
+     * iframe blocking meta tags తొలగింపు
+     */
 
     html = html.replace(
       /<meta[^>]+http-equiv=["']?X-Frame-Options["']?[^>]*>/gi,
@@ -146,28 +349,18 @@ app.get('/article', async (req, res) => {
     );
 
 
-    /* =========================
-       ADD BASE URL
-    ========================= */
+    /*
+     * Relative URLs పనిచేయడానికి base URL
+     */
 
     if (!/<base\s/i.test(html)) {
 
       html = html.replace(
         /<head([^>]*)>/i,
-        `<head$1><base href="${finalUrl}">`
+        `<head$1><base href="${publisherUrl}">`
       );
 
     }
-
-
-    /* =========================
-       REMOVE FRAME BLOCKING JS
-    ========================= */
-
-    html = html.replace(
-      /if\s*\(\s*window\.top\s*!==\s*window\.self\s*\)[\s\S]*?;/gi,
-      ''
-    );
 
 
     res.setHeader(
@@ -180,26 +373,30 @@ app.get('/article', async (req, res) => {
       'ALLOWALL'
     );
 
-    res.removeHeader('Content-Security-Policy');
-
     return res.send(html);
 
 
   } catch (err) {
 
-    console.error('Article Error:', err.message);
-
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (e) {}
-    }
+    console.error(
+      'Article Error:',
+      err.message
+    );
 
     return res.status(500).send(`
+      <!DOCTYPE html>
       <html>
-      <body style="font-family:Arial;padding:30px;">
-      <h3>వార్తను తెరవలేకపోయాం</h3>
-      <p>${err.message}</p>
+      <head>
+        <meta charset="UTF-8">
+        <title>వార్త లోపం</title>
+      </head>
+      <body style="
+        font-family:Arial,sans-serif;
+        padding:30px;
+        line-height:1.6;
+      ">
+        <h3>వార్తను తెరవలేకపోయాం</h3>
+        <p>${err.message}</p>
       </body>
       </html>
     `);
@@ -207,12 +404,17 @@ app.get('/article', async (req, res) => {
 });
 
 
-/* =========================
+/* =========================================================
    SERVER
-========================= */
+   ========================================================= */
 
-const PORT = process.env.PORT || 10000;
+const PORT =
+  process.env.PORT || 10000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+
+  console.log(
+    `Server running on port ${PORT}`
+  );
+
 });
