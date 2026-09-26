@@ -31,14 +31,14 @@ async function getBrowser() {
   return browser;
 }
 
-// Google News URL ని అసలు Publisher URL గా మార్చే మెరుగైన ఫంక్షన్
+// Navigation క్రాష్ అవ్వకుండా Google News URL ని Resolver చేసే మెరుగైన లాజిక్
 async function resolveGoogleNewsUrl(googleUrl) {
   if (!/news\.google\.com/i.test(googleUrl)) {
     return googleUrl;
   }
 
-  let page = null;
   let context = null;
+  let page = null;
 
   try {
     const b = await getBrowser();
@@ -46,68 +46,59 @@ async function resolveGoogleNewsUrl(googleUrl) {
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      locale: "en-US",
+      locale: "ta-IN",
       extraHTTPHeaders: {
-        "Accept-Language": "en-US,en;q=0.9"
+        "Accept-Language": "ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7"
       }
     });
 
     page = await context.newPage();
 
-    // అవసరం లేని ఇమేజ్‌లు మరియు CSS ని బ్లాక్ చేయడం ద్వారా వేగవంతం చేయడం
+    // అనవసరమైన మీడియా ఫైళ్లను బ్లాక్ చేయడం
     await page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", route => route.abort());
 
-    // గూగుల్ రీడైరెక్ట్ కోసం అభ్యర్థనను పంపడం
-    const response = await page.goto(googleUrl, {
-      waitUntil: "commit",
+    // పేజీని ఓపెన్ చేయడం
+    await page.goto(googleUrl, {
+      waitUntil: "domcontentloaded",
       timeout: 20000
-    });
+    }).catch(() => {});
 
-    // రీడైరెక్షన్ పూర్తయ్యే వరకు గరిష్టంగా 4 సెకన్ల సమయం ఇవ్వడం
-    for (let i = 0; i < 8; i++) {
-      await page.waitForTimeout(500);
-      const currentUrl = page.url();
-      if (currentUrl && !/news\.google\.com/i.test(currentUrl) && /^https?:\/\//i.test(currentUrl)) {
-        await context.close();
-        return currentUrl;
-      }
+    // Execution Context Destroyed అవ్వకుండా URL మారింది అని కన్ఫర్మ్ చేసుకునే వరకు వెయిట్ చేయడం
+    try {
+      await page.waitForURL(url => !/news\.google\.com/i.test(url.href), {
+        timeout: 8000
+      });
+    } catch (e) {
+      // టైమ్‌అవుట్ అయినా సరే ప్రాసెస్ కొనసాగుతుంది
     }
 
-    // DOM లోని Canonical లేదా HTML లింకుల నుండి ఒరిజినల్ URL ను వెతకడం
-    const extractedUrl = await page.evaluate(() => {
-      // 1. Anchor tags తో చెక్ చేయడం
-      const links = Array.from(document.querySelectorAll("a[href]"));
-      for (const a of links) {
-        const href = a.href;
-        if (href && /^https?:\/\//i.test(href) && !/google\.com/i.test(href)) {
-          return href;
-        }
-      }
-      // 2. Canonical Tag తో చెక్ చేయడం
-      const canonical = document.querySelector('link[rel="canonical"]');
-      if (canonical && canonical.href && !/google\.com/i.test(canonical.href)) {
-        return canonical.href;
-      }
-      // 3. Open Graph URL తో చెక్ చేయడం
-      const og = document.querySelector('meta[property="og:url"]');
-      if (og && og.content && !/google\.com/i.test(og.content)) {
-        return og.content;
-      }
-      return null;
-    });
+    const currentUrl = page.url();
+    if (currentUrl && !/news\.google\.com/i.test(currentUrl) && /^https?:\/\//i.test(currentUrl)) {
+      return currentUrl;
+    }
 
-    await context.close();
+    // ఆగ్జానిక్ మెథడ్: page.evaluate సురక్షితంగా రన్ చేయడం
+    let targetLink = null;
+    try {
+      targetLink = await page.getAttribute('a[href^="http"]:not([href*="google.com"])', 'href');
+    } catch (evalErr) {
+      // నేవిగేషన్ సమస్య ఉంటే ఇక్కడ క్రాష్ అవ్వకుండా ఆపుతుంది
+    }
 
-    if (extractedUrl) {
-      return extractedUrl;
+    if (targetLink) {
+      return targetLink;
+    }
+
+    if (currentUrl && !/news\.google\.com/i.test(currentUrl)) {
+      return currentUrl;
     }
 
     throw new Error("Google News నుంచి అసలు publisher URL పొందలేకపోయాం.");
-  } catch (err) {
-    if (context) {
-      await context.close().catch(() => {});
-    }
-    throw err;
+
+  } finally {
+    // ప్రతి రిక్వెస్ట్ ముగిశాక క్లీన్ చేయడం వల్ల తర్వాతి వార్తలు క్రాష్ అవ్వకుండా లోడ్ అవుతాయి
+    if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
   }
 }
 
@@ -186,7 +177,7 @@ app.get("/article", async (req, res) => {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
           "AppleWebKit/537.36 (KHTML, like Gecko) " +
           "Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
+        "Accept-Language": "ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7"
       },
       validateStatus: s => s >= 200 && s < 500
     });
