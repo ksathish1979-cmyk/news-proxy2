@@ -36,18 +36,20 @@ async function resolveGoogleNewsUrl(googleUrl) {
   const page = await browser.newPage({
     userAgent:
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
-    locale: "ta-IN"
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    locale: "ta-IN",
+    extraHTTPHeaders: {
+      "Accept-Language": "ta-IN,ta;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
   });
 
   try {
-    // పేజీ లోడ్ అయ్యే వరకు ఆగుతుంది
+    // పేజీ నేవిగేషన్‌ను జాగ్రత్తగా హ్యాండిల్ చేయడం
     await page.goto(googleUrl, {
       waitUntil: "domcontentloaded",
       timeout: 30000
     });
 
-    // రిడైరెక్షన్ పూర్తిగా జరిగే వరకు 3 సెకన్లు ఆగుతుంది
     await page.waitForTimeout(3000);
 
     const finalUrl = page.url();
@@ -60,7 +62,6 @@ async function resolveGoogleNewsUrl(googleUrl) {
       return finalUrl;
     }
 
-    // Execution context destroyed ఎర్రర్ రాకుండా సురక్షితంగా వెతకడం
     let candidates = [];
     try {
       candidates = await page.evaluate(() => {
@@ -87,7 +88,6 @@ async function resolveGoogleNewsUrl(googleUrl) {
         return [...new Set(out)];
       });
     } catch (evalErr) {
-      // రిడైరెక్ట్ అవ్వడం వల్ల ఎర్రర్ వస్తే, రిడైరెక్ట్ అయిన తదుపరి పేజీ URL ని నేరుగా తీసుకుంటుంది
       const currentUrl = page.url();
       if (currentUrl && !/news\.google\.com/i.test(currentUrl)) {
         return currentUrl;
@@ -98,7 +98,6 @@ async function resolveGoogleNewsUrl(googleUrl) {
       if (!/news\.google\.com/i.test(url)) return url;
     }
 
-    // ఏదీ కుదరకపోతే చివరిగా ప్రాసెస్ అయిన URL ని ఇస్తుంది
     const fallbackUrl = page.url();
     if (fallbackUrl && !/news\.google\.com/i.test(fallbackUrl)) {
       return fallbackUrl;
@@ -184,7 +183,7 @@ app.get("/article", async (req, res) => {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
           "AppleWebKit/537.36 (KHTML, like Gecko) " +
-          "Chrome/154.0.0.0 Safari/537.36",
+          "Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": "ta-IN,ta;q=0.9,en;q=0.7"
       },
       validateStatus: s => s >= 200 && s < 500
